@@ -1,21 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  AlertCircle,
-  ArrowUpRight,
-  Database,
-  Download,
-  Gauge,
-  Info,
-  Layers3,
-  Map as MapIcon,
-  Play,
-  RotateCcw,
-  Sparkles,
-  Timer,
-  Trophy,
-  X,
-  Zap,
-} from "lucide-react";
+import { ArrowUpRight, Check, CircleHelp, Gauge, Info, Map as MapIcon, Play, RotateCcw, Timer, X, Zap } from "lucide-react";
 
 import esriConfig from "@arcgis/core/config.js";
 import Map from "@arcgis/core/Map.js";
@@ -24,2663 +8,474 @@ import FeatureLayer from "@arcgis/core/layers/FeatureLayer.js";
 import ParquetLayer from "@arcgis/core/layers/ParquetLayer.js";
 import ParquetPortalItemData from "@arcgis/core/layers/support/ParquetPortalItemData.js";
 import * as reactiveUtils from "@arcgis/core/core/reactiveUtils.js";
-
-/* -------------------------------------------------------------------------- */
-/* Konfiguration                                                              */
-/* -------------------------------------------------------------------------- */
+import "./App.css";
 
 const PORTAL_URL = "https://www.arcgis.com";
-const BASEMAP = "gray-vector";
-
-const PARQUET_INFO_URL =
-  "https://www.esri.com/arcgis-blog/products/arcgis-online/announcements/scaling-your-gis-workflows-with-the-new-parquet-feature-layer-beta-in-arcgis-online";
-
+const PARQUET_INFO_URL = "https://www.esri.com/arcgis-blog/products/arcgis-online/announcements/scaling-your-gis-workflows-with-the-new-parquet-feature-layer-beta-in-arcgis-online";
 const MAP_CENTER = [10.4, 51.1];
-
-const INITIAL_VIEWPOINT = {
-  center: MAP_CENTER,
-  zoom: 5,
-};
-
+const INITIAL_ZOOM = 5;
 const LOAD_TIMEOUT_MS = 30000;
 
-const ZOOM_STAGES = [
-  {
-    id: "deutschland",
-    label: "Deutschland",
-    zoom: 5,
-    description: "Deutschlandweite Ansicht und erstmaliges Laden",
-  },
-  {
-    id: "regional",
-    label: "Regional",
-    zoom: 7,
-    description: "Regionale Ansicht nach dem Zoomen",
-  },
-  {
-    id: "lokal",
-    label: "Lokal",
-    zoom: 9,
-    description: "Lokale Ansicht nach dem Zoomen",
-  },
+const STAGES = [
+  { id: "deutschland", label: "Deutschland", zoom: 5, detail: "Erstes Laden" },
+  { id: "regional", label: "Region", zoom: 7, detail: "Neu zeichnen" },
+  { id: "lokal", label: "Lokal", zoom: 9, detail: "Neu zeichnen" },
 ];
 
 const DATASETS = {
   haltestellen: {
-    id: "haltestellen",
     label: "Haltestellen",
     description: "Haltestellen in Deutschland",
     geometryType: "point",
     totalFeatures: 719525,
-
-    parquetItemId:
-      "f110c8c9a2ef47e096ed6b1b5ca21f00",
-
-    featureLayerItemId:
-      "b0f19ce050d74cf0a5f6d5937b4efa0d",
+    parquetItemId: "f110c8c9a2ef47e096ed6b1b5ca21f00",
+    featureLayerItemId: "b0f19ce050d74cf0a5f6d5937b4efa0d",
   },
-
   radwege: {
-    id: "radwege",
     label: "Radwege",
     description: "Radwege in Deutschland",
     geometryType: "polyline",
     totalFeatures: 795657,
-
-    parquetItemId:
-      "f5bf927307854cefa9c5cb0cec5e2fa0",
-
-    featureLayerItemId:
-      "298312d8d3534ad28e6d6d9355d62228",
+    parquetItemId: "f5bf927307854cefa9c5cb0cec5e2fa0",
+    featureLayerItemId: "298312d8d3534ad28e6d6d9355d62228",
   },
 };
 
-/* -------------------------------------------------------------------------- */
-/* Hilfsfunktionen                                                            */
-/* -------------------------------------------------------------------------- */
+const numberFormatter = new Intl.NumberFormat("de-DE");
+const secondsFormatter = new Intl.NumberFormat("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const formatSeconds = (milliseconds) => milliseconds == null ? "–" : secondsFormatter.format(milliseconds / 1000);
 
-function waitForFrames(numberOfFrames = 2) {
+function waitForFrames(count = 2) {
   return new Promise((resolve) => {
-    let remainingFrames = numberOfFrames;
-
-    function nextFrame() {
-      if (remainingFrames <= 0) {
-        resolve();
-        return;
-      }
-
-      remainingFrames -= 1;
-      requestAnimationFrame(nextFrame);
-    }
-
-    nextFrame();
+    const next = () => count-- <= 0 ? resolve() : requestAnimationFrame(next);
+    next();
   });
 }
 
-function withTimeout(
-  promise,
-  timeoutMilliseconds,
-  timeoutMessage,
-) {
-  let timeoutId = null;
-
-  const timeoutPromise = new Promise((_, reject) => {
-    timeoutId = window.setTimeout(() => {
-      reject(new Error(timeoutMessage));
-    }, timeoutMilliseconds);
+function withTimeout(promise, message) {
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = window.setTimeout(() => reject(new Error(message)), LOAD_TIMEOUT_MS);
   });
-
-  return Promise.race([
-    Promise.resolve(promise).finally(() => {
-      if (timeoutId) {
-        window.clearTimeout(timeoutId);
-      }
-    }),
-
-    timeoutPromise,
-  ]);
+  return Promise.race([promise, timeout]).finally(() => window.clearTimeout(timeoutId));
 }
 
-/*
- * Die Messung endet, wenn:
- *
- * 1. die Kartenansicht stillsteht,
- * 2. die LayerView nicht mehr aktualisiert wird,
- * 3. die LayerView nicht ausgesetzt ist.
- *
- * Es gibt bewusst kein zusätzliches 300-ms-Stabilitätsfenster.
- */
-function waitForLayerViewReady({
-  view,
-  layerView,
-}) {
-  return reactiveUtils.whenOnce(
-    () =>
-      view.stationary &&
-      !layerView.updating &&
-      !layerView.suspended,
-  );
+const waitForLayerView = (view, layerView) => reactiveUtils.whenOnce(
+  () => view.stationary && !layerView.updating && !layerView.suspended,
+);
+
+function formatError(error) {
+  return [error?.name, error?.message, ...(error?.details?.messages ?? [])].filter(Boolean).join(": ") || "Unbekannter Fehler bei der ArcGIS-Analyse.";
 }
 
-function formatSeconds(milliseconds) {
-  if (milliseconds == null) {
-    return "–";
-  }
-
-  return new Intl.NumberFormat("de-DE", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(milliseconds / 1000);
-}
-
-function formatNumber(value) {
-  if (value == null) {
-    return "–";
-  }
-
-  return new Intl.NumberFormat("de-DE").format(value);
-}
-
-function formatArcGISError(error) {
-  const messages = [
-    error?.name,
-    error?.message,
-    ...(error?.details?.messages ?? []),
-  ].filter(Boolean);
-
-  if (messages.length > 0) {
-    return messages.join(": ");
-  }
-
-  return "Unbekannter Fehler bei der ArcGIS-Analyse.";
-}
-
-function createRenderer(
-  geometryType,
-  color,
-) {
+function createRenderer(geometryType, color) {
   if (geometryType === "polyline") {
-    return {
-      type: "simple",
-
-      symbol: {
-        type: "simple-line",
-        color,
-        width: 1.2,
-        style: "solid",
-      },
-    };
+    return { type: "simple", symbol: { type: "simple-line", color, width: 1.4, style: "solid" } };
   }
-
   return {
     type: "simple",
-
-    symbol: {
-      type: "simple-marker",
-      style: "circle",
-      color,
-      size: 3,
-
-      outline: {
-        color: [255, 255, 255, 0.25],
-        width: 0.25,
-      },
-    },
+    symbol: { type: "simple-marker", style: "circle", color, size: 3, outline: { color: [255, 255, 255, 0.3], width: 0.25 } },
   };
 }
 
-function getWinner({
-  featureMilliseconds,
-  parquetMilliseconds,
-  featureTimedOut = false,
-  parquetTimedOut = false,
-}) {
-  if (featureTimedOut && !parquetTimedOut) {
-    return "GeoParquet";
-  }
-
-  if (parquetTimedOut && !featureTimedOut) {
-    return "Feature Layer";
-  }
-
-  if (featureTimedOut && parquetTimedOut) {
-    return "Kein Ergebnis";
-  }
-
-  if (
-    featureMilliseconds == null ||
-    parquetMilliseconds == null
-  ) {
-    return null;
-  }
-
-  if (featureMilliseconds < parquetMilliseconds) {
-    return "Feature Layer";
-  }
-
-  if (parquetMilliseconds < featureMilliseconds) {
-    return "GeoParquet";
-  }
-
-  return "Gleichstand";
+function winnerFor(result) {
+  if (!result) return null;
+  if (result.featureTimedOut && result.parquetTimedOut) return "none";
+  if (result.featureTimedOut) return "parquet";
+  if (result.parquetTimedOut) return "feature";
+  if (result.featureMs === result.parquetMs) return "tie";
+  return result.featureMs < result.parquetMs ? "feature" : "parquet";
 }
 
-function getWinnerKey(result) {
-  if (!result) {
-    return null;
-  }
+const resultFrom = (stage, feature, parquet) => ({
+  ...stage,
+  featureMs: feature.duration,
+  parquetMs: parquet.duration,
+  featureTimedOut: feature.timedOut,
+  parquetTimedOut: parquet.timedOut,
+  differenceMs: Math.abs(feature.duration - parquet.duration),
+});
 
-  const winner = getWinner({
-    featureMilliseconds: result.featureMs,
-    parquetMilliseconds: result.parquetMs,
-    featureTimedOut: result.featureTimedOut,
-    parquetTimedOut: result.parquetTimedOut,
-  });
+const emptyTimer = () => ({ milliseconds: 0, running: false, finished: false, timedOut: false, status: "Bereit" });
 
-  if (winner === "Feature Layer") {
-    return "feature";
-  }
-
-  if (winner === "GeoParquet") {
-    return "parquet";
-  }
-
-  if (winner === "Gleichstand") {
-    return "tie";
-  }
-
-  return null;
-}
-
-function getCompletenessText({
-  timedOut,
-  maximumNumberOfFeaturesExceeded,
-  hasAllFeaturesInView,
-}) {
-  if (timedOut) {
-    return "Zeitlimit von 30 Sekunden erreicht";
-  }
-
-  if (maximumNumberOfFeaturesExceeded) {
-    return "Darstellung abgeschlossen, Feature-Limit erreicht";
-  }
-
-  if (hasAllFeaturesInView === true) {
-    return "Alle verfügbaren Features im Ausschnitt dargestellt";
-  }
-
-  return "Darstellung abgeschlossen";
-}
-
-function createInitialTimerState() {
-  return {
-    milliseconds: 0,
-    running: false,
-    finished: false,
-    timedOut: false,
-    status: "Bereit",
-  };
-}
-
-/* -------------------------------------------------------------------------- */
-/* UI-Komponenten                                                             */
-/* -------------------------------------------------------------------------- */
-
-function ParquetInfoModal({
-  isOpen,
-  onClose,
-}) {
-  if (!isOpen) {
-    return null;
-  }
-
+function InfoModal({ onClose }) {
   return (
-    <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-md"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="parquet-info-title"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose();
-        }
-      }}
-    >
-      <div className="relative max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-[2rem] border border-white/50 bg-white/90 shadow-2xl backdrop-blur-xl">
-        <div className="relative overflow-hidden rounded-t-[2rem] bg-gradient-to-br from-violet-600 via-blue-600 to-cyan-500 px-6 py-7 text-white sm:px-8">
-          <div className="absolute -right-16 -top-20 h-56 w-56 rounded-full bg-white/15 blur-2xl" />
-
-          <div className="absolute -bottom-20 -left-12 h-48 w-48 rounded-full bg-cyan-300/20 blur-2xl" />
-
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Informationsfenster schließen"
-            className="absolute right-4 top-4 rounded-full border border-white/30 bg-white/15 p-2 text-white transition hover:scale-105 hover:bg-white/25"
-          >
-            <X className="h-5 w-5" />
-          </button>
-
-          <div className="relative">
-            <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-white/25 bg-white/15 px-3 py-1 text-xs font-semibold backdrop-blur">
-              <Sparkles className="h-3.5 w-3.5" />
-              Neu in ArcGIS Online
-            </div>
-
-            <div className="flex items-start gap-4">
-              <div className="rounded-2xl bg-white/15 p-3 shadow-inner backdrop-blur">
-                <Database className="h-8 w-8" />
-              </div>
-
-              <div>
-                <h2
-                  id="parquet-info-title"
-                  className="text-2xl font-bold tracking-tight sm:text-3xl"
-                >
-                  Parquet Feature Layer
-                </h2>
-
-                <p className="mt-2 max-w-xl text-sm leading-6 text-blue-50 sm:text-base">
-                  Ein neuer Layer-Typ für schnelle und
-                  skalierbare Karten mit sehr großen
-                  Geodatensätzen.
-                </p>
-              </div>
-            </div>
-          </div>
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="info-title" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="modal-card">
+        <button className="icon-button modal-close" onClick={onClose} aria-label="Fenster schließen"><X size={18} /></button>
+        <span className="eyebrow"><Zap size={14} /> Neuer Layer-Typ</span>
+        <h2 id="info-title">Was ist ein Parquet Feature Layer?</h2>
+        <p>Ein schreibgeschützter ArcGIS Layer für die schnelle Visualisierung sehr großer Geodatensätze. Dieser Benchmark lädt identische Daten in beiden Formaten und misst, wann die Karte fertig gezeichnet ist.</p>
+        <div className="modal-facts">
+          <span><Gauge size={18} /><strong>Optimiert</strong> für große Datenmengen</span>
+          <span><MapIcon size={18} /><strong>Vergleichbar</strong> in drei Maßstäben</span>
         </div>
-
-        <div className="p-6 sm:p-8">
-          <p className="text-sm leading-6 text-slate-600">
-            Parquet Feature Layer kombinieren die
-            spaltenbasierte Speicherung von Parquet mit
-            räumlicher Optimierung. Dadurch können große,
-            schreibgeschützte Referenzdatensätze effizient
-            visualisiert und clientseitig abgefragt werden.
-          </p>
-
-          <div className="mt-6 grid gap-3 sm:grid-cols-3">
-            <div className="rounded-2xl border border-violet-100 bg-violet-50 p-4">
-              <Zap className="h-5 w-5 text-violet-600" />
-
-              <p className="mt-3 text-sm font-semibold text-violet-950">
-                Schnelles Zeichnen
-              </p>
-
-              <p className="mt-1 text-xs leading-5 text-violet-700">
-                Für große Datenmengen und schnelle
-                Kartendarstellung optimiert.
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
-              <Layers3 className="h-5 w-5 text-blue-600" />
-
-              <p className="mt-3 text-sm font-semibold text-blue-950">
-                Mehrere Maßstäbe
-              </p>
-
-              <p className="mt-1 text-xs leading-5 text-blue-700">
-                Generalisierte Geometrien unterstützen
-                unterschiedliche Zoomstufen.
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-cyan-100 bg-cyan-50 p-4">
-              <Gauge className="h-5 w-5 text-cyan-600" />
-
-              <p className="mt-3 text-sm font-semibold text-cyan-950">
-                Große Datensätze
-              </p>
-
-              <p className="mt-1 text-xs leading-5 text-cyan-700">
-                Besonders für große und räumlich verteilte
-                Referenzdaten geeignet.
-              </p>
-            </div>
-          </div>
-
-          <div className="mt-6 rounded-2xl border border-amber-200 bg-amber-50 p-4">
-            <div className="flex items-start gap-3">
-              <Info className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
-
-              <div>
-                <p className="text-sm font-semibold text-amber-950">
-                  Aktuell als Beta verfügbar
-                </p>
-
-                <p className="mt-1 text-xs leading-5 text-amber-800">
-                  Parquet Feature Layer sind primär für
-                  schreibgeschützte Visualisierungs- und
-                  Referenzworkflows vorgesehen. Einige
-                  Funktionen unterscheiden sich daher von
-                  klassischen Feature Layern.
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="mt-7 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-xl border border-slate-300 bg-white px-5 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-            >
-              Benchmark ansehen
-            </button>
-
-            <a
-              href={PARQUET_INFO_URL}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-700"
-            >
-              Mehr erfahren
-              <ArrowUpRight className="h-4 w-4" />
-            </a>
-          </div>
+        <div className="modal-actions">
+          <button className="secondary-button" onClick={onClose}>Benchmark ansehen</button>
+          <a className="primary-link" href={PARQUET_INFO_URL} target="_blank" rel="noreferrer">Mehr erfahren <ArrowUpRight size={16} /></a>
         </div>
       </div>
     </div>
   );
 }
 
-function StatCard({
-  title,
-  value,
-  subtitle,
-  active = false,
-  winner = false,
-  warning = false,
-  color = "blue",
-}) {
-  let colorClasses =
-    "border-white/80 bg-white/85 shadow-slate-900/5";
-
-  if (active) {
-    colorClasses =
-      "border-amber-300 bg-amber-50/90 shadow-amber-900/10";
-  }
-
-  if (winner) {
-    colorClasses =
-      "border-emerald-300 bg-emerald-50/90 shadow-emerald-900/10";
-  }
-
-  if (warning) {
-    colorClasses =
-      "border-red-300 bg-red-50/90 shadow-red-900/10";
-  }
-
-  const indicatorClasses =
-    color === "orange"
-      ? "bg-orange-500"
-      : color === "blue"
-        ? "bg-blue-600"
-        : "bg-violet-500";
-
+function MapPanel({ type, dataset, zoom, timer, containerRef }) {
+  const isParquet = type === "parquet";
   return (
-    <div
-      className={`rounded-[1.5rem] border p-4 shadow-lg backdrop-blur transition hover:-translate-y-0.5 hover:shadow-xl ${colorClasses}`}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <span
-            className={`h-3 w-3 rounded-full shadow-sm ${indicatorClasses}`}
-          />
-
-          <p className="text-sm font-medium text-slate-500">
-            {title}
-          </p>
-        </div>
-
-        {winner && (
-          <Trophy className="h-4 w-4 text-emerald-600" />
-        )}
-
-        {warning && (
-          <AlertCircle className="h-4 w-4 text-red-600" />
-        )}
+    <article className={`map-panel ${isParquet ? "parquet" : "feature"}`}>
+      <div className="map-heading">
+        <span className="layer-dot" />
+        <div><strong>{isParquet ? "GeoParquet" : "Feature Layer"}</strong><small>{dataset.label} · Zoom {zoom}</small></div>
       </div>
-
-      <p
-        className={`mt-2 font-bold tracking-tight ${
-          warning
-            ? "text-lg text-red-800"
-            : "text-2xl text-slate-900"
-        }`}
-      >
-        {value}
-      </p>
-
-      <p className="mt-1 text-xs leading-5 text-slate-500">
-        {subtitle}
-      </p>
-    </div>
+      <div ref={containerRef} className="map-canvas" />
+      <div className={`map-timer ${timer.running ? "is-running" : ""} ${timer.timedOut ? "is-error" : ""}`}>
+        <span><Timer size={14} /> {timer.status}</span>
+        <strong>{timer.timedOut ? "> 30,00" : formatSeconds(timer.milliseconds)} <small>s</small></strong>
+      </div>
+    </article>
   );
 }
 
-function MapLabel({
-  title,
-  subtitle,
-  color,
-}) {
-  const indicatorClasses =
-    color === "orange"
-      ? "bg-orange-500"
-      : "bg-blue-600";
-
+function StageResult({ stage, result, active }) {
+  const winner = winnerFor(result);
   return (
-    <div className="absolute left-3 top-3 z-10 rounded-2xl border border-white/70 bg-white/85 px-3 py-2 shadow-lg backdrop-blur-md">
-      <div className="flex items-center gap-2">
-        <span
-          className={`h-3 w-3 rounded-full shadow-sm ${indicatorClasses}`}
-        />
-
-        <p className="text-sm font-semibold text-slate-900">
-          {title}
-        </p>
+    <article className={`stage-card ${active ? "is-active" : ""} ${result ? "is-complete" : ""}`}>
+      <div className="stage-title">
+        <span>{result ? <Check size={13} /> : stage.zoom}</span>
+        <div><strong>{stage.label}</strong><small>Zoom {stage.zoom} · {stage.detail}</small></div>
       </div>
-
-      <p className="mt-1 text-xs text-slate-500">
-        {subtitle}
-      </p>
-    </div>
-  );
-}
-
-function MapTimer({
-  timer,
-  color,
-}) {
-  let statusClasses =
-    "bg-slate-100 text-slate-600";
-
-  let valueClasses =
-    "text-slate-900";
-
-  if (timer.running) {
-    statusClasses =
-      "bg-amber-100 text-amber-800";
-
-    valueClasses =
-      "text-amber-700";
-  }
-
-  if (timer.finished) {
-    statusClasses =
-      "bg-emerald-100 text-emerald-800";
-
-    valueClasses =
-      color === "orange"
-        ? "text-orange-600"
-        : "text-blue-700";
-  }
-
-  if (timer.timedOut) {
-    statusClasses =
-      "bg-red-100 text-red-800";
-
-    valueClasses =
-      "text-red-700";
-  }
-
-  return (
-    <div className="absolute bottom-4 left-1/2 z-20 min-w-[190px] -translate-x-1/2 rounded-2xl border border-white/70 bg-white/90 px-5 py-3 text-center shadow-xl backdrop-blur-md">
-      <div className="flex items-center justify-center gap-2">
-        <Timer className="h-4 w-4 text-slate-500" />
-
-        <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-          Ladezeit
-        </span>
-      </div>
-
-      <p
-        className={`mt-1 text-2xl font-bold tabular-nums ${valueClasses}`}
-      >
-        {timer.timedOut
-          ? "> 30,00 s"
-          : `${formatSeconds(
-              timer.milliseconds,
-            )} s`}
-      </p>
-
-      <span
-        className={`mt-2 inline-block rounded-full px-2 py-1 text-xs font-medium ${statusClasses}`}
-      >
-        {timer.status}
-      </span>
-    </div>
-  );
-}
-
-function ZoomResultCard({ result }) {
-  const winnerKey = getWinnerKey(result);
-
-  return (
-    <div className="rounded-[1.5rem] border border-white/80 bg-white/85 p-4 shadow-lg shadow-slate-900/5 backdrop-blur transition hover:-translate-y-0.5 hover:shadow-xl">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="font-semibold text-slate-900">
-            {result.label}
+      {!result ? <p className="stage-empty">{active ? "Wird gerade gemessen …" : "Wartet auf Start"}</p> : (
+        <>
+          <div className="result-row">
+            <span className={winner === "feature" ? "winner" : ""}><i className="feature-color" />Feature<strong>{result.featureTimedOut ? "> 30,00" : formatSeconds(result.featureMs)} s</strong></span>
+            <span className={winner === "parquet" ? "winner" : ""}><i className="parquet-color" />GeoParquet<strong>{result.parquetTimedOut ? "> 30,00" : formatSeconds(result.parquetMs)} s</strong></span>
+          </div>
+          <p className="result-summary">
+            {winner === "none" ? "Beide Zeitlimits erreicht" : winner === "tie" ? "Gleichstand" : <><b>{winner === "parquet" ? "GeoParquet" : "Feature Layer"}</b> ist {formatSeconds(result.differenceMs)} s schneller</>}
           </p>
-
-          <p className="text-xs text-slate-500">
-            Zoom {result.zoom} ·{" "}
-            {result.description}
-          </p>
-        </div>
-
-        {result.winner && (
-          <span
-            className={`rounded-full px-2 py-1 text-xs font-medium ${
-              result.featureTimedOut &&
-              result.parquetTimedOut
-                ? "bg-red-100 text-red-800"
-                : "bg-emerald-100 text-emerald-800"
-            }`}
-          >
-            {result.winner}
-          </span>
-        )}
-      </div>
-
-      <div className="mt-4 grid grid-cols-2 gap-3">
-        <div
-          className={`rounded-xl p-3 ${
-            result.featureTimedOut
-              ? "bg-red-50"
-              : winnerKey === "feature"
-                ? "bg-emerald-50"
-                : "bg-blue-50"
-          }`}
-        >
-          <p className="text-xs text-slate-500">
-            Feature Layer
-          </p>
-
-          <p
-            className={`mt-1 text-lg font-bold ${
-              result.featureTimedOut
-                ? "text-red-700"
-                : "text-slate-900"
-            }`}
-          >
-            {result.featureTimedOut
-              ? "> 30,00 s"
-              : `${formatSeconds(
-                  result.featureMs,
-                )} s`}
-          </p>
-        </div>
-
-        <div
-          className={`rounded-xl p-3 ${
-            result.parquetTimedOut
-              ? "bg-red-50"
-              : winnerKey === "parquet"
-                ? "bg-emerald-50"
-                : "bg-orange-50"
-          }`}
-        >
-          <p className="text-xs text-slate-500">
-            GeoParquet
-          </p>
-
-          <p
-            className={`mt-1 text-lg font-bold ${
-              result.parquetTimedOut
-                ? "text-red-700"
-                : "text-slate-900"
-            }`}
-          >
-            {result.parquetTimedOut
-              ? "> 30,00 s"
-              : `${formatSeconds(
-                  result.parquetMs,
-                )} s`}
-          </p>
-        </div>
-      </div>
-
-      {result.featureTimedOut ||
-      result.parquetTimedOut ? (
-        <p className="mt-3 text-xs font-medium text-red-700">
-          Mindestens ein Layer hat das
-          Zeitlimit von 30 Sekunden erreicht.
-        </p>
-      ) : (
-        <p className="mt-3 text-xs text-slate-500">
-          Unterschied:{" "}
-          <strong className="text-slate-700">
-            {formatSeconds(
-              result.differenceMs,
-            )}{" "}
-            s
-          </strong>
-        </p>
+        </>
       )}
-    </div>
+    </article>
   );
 }
-
-/* -------------------------------------------------------------------------- */
-/* App                                                                        */
-/* -------------------------------------------------------------------------- */
 
 export default function App() {
   const featureContainerRef = useRef(null);
   const parquetContainerRef = useRef(null);
-
   const runtimeRef = useRef(null);
-  const historyRef = useRef([]);
+  const syncLockRef = useRef(false);
+  const syncPausedRef = useRef(false);
+  const syncTimeoutRef = useRef(null);
+  const timerIntervalsRef = useRef({ feature: null, parquet: null });
 
-  const synchronizationLockRef =
-    useRef(false);
+  const [selectedDatasetId, setSelectedDatasetId] = useState("haltestellen");
+  const [ready, setReady] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [status, setStatus] = useState("Karten werden vorbereitet …");
+  const [error, setError] = useState("");
+  const [currentZoom, setCurrentZoom] = useState(INITIAL_ZOOM);
+  const [results, setResults] = useState([]);
+  const [featureTimer, setFeatureTimer] = useState(emptyTimer);
+  const [parquetTimer, setParquetTimer] = useState(emptyTimer);
+  const [showInfo, setShowInfo] = useState(false);
 
-  const synchronizationPausedRef =
-    useRef(false);
+  const dataset = DATASETS[selectedDatasetId];
+  const timerSetters = { feature: setFeatureTimer, parquet: setParquetTimer };
 
-  const synchronizationTimeoutRef =
-    useRef(null);
-
-  const featureTimerIntervalRef =
-    useRef(null);
-
-  const parquetTimerIntervalRef =
-    useRef(null);
-
-  const [showInfoModal, setShowInfoModal] =
-    useState(true);
-
-  const [
-    selectedDatasetId,
-    setSelectedDatasetId,
-  ] = useState("haltestellen");
-
-  const [ready, setReady] =
-    useState(false);
-
-  const [running, setRunning] =
-    useState(false);
-
-  const [status, setStatus] =
-    useState(
-      "ArcGIS-Karten werden initialisiert ...",
-    );
-
-  const [error, setError] =
-    useState("");
-
-  const [currentZoom, setCurrentZoom] =
-    useState(INITIAL_VIEWPOINT.zoom);
-
-  const [results, setResults] =
-    useState([]);
-
-  const [history, setHistory] =
-    useState([]);
-
-  const [
-    featureTimer,
-    setFeatureTimer,
-  ] = useState(createInitialTimerState);
-
-  const [
-    parquetTimer,
-    setParquetTimer,
-  ] = useState(createInitialTimerState);
-
-  const selectedDataset =
-    DATASETS[selectedDatasetId];
-
-  const germanyResult =
-    results.find(
-      (result) =>
-        result.stageId === "deutschland",
-    ) ?? null;
-
-  const germanyWinnerKey =
-    getWinnerKey(germanyResult);
-
-  function getTimerConfiguration(
-    layerType,
-  ) {
-    if (layerType === "feature") {
-      return {
-        intervalRef:
-          featureTimerIntervalRef,
-
-        setTimer:
-          setFeatureTimer,
-      };
+  function clearTimer(type) {
+    if (timerIntervalsRef.current[type]) {
+      window.clearInterval(timerIntervalsRef.current[type]);
+      timerIntervalsRef.current[type] = null;
     }
+  }
 
-    return {
-      intervalRef:
-        parquetTimerIntervalRef,
-
-      setTimer:
-        setParquetTimer,
+  function startTimer(type, label) {
+    clearTimer(type);
+    const start = performance.now();
+    const update = () => {
+      const elapsed = Math.min(performance.now() - start, LOAD_TIMEOUT_MS);
+      timerSetters[type]({ milliseconds: elapsed, running: elapsed < LOAD_TIMEOUT_MS, finished: false, timedOut: elapsed >= LOAD_TIMEOUT_MS, status: elapsed >= LOAD_TIMEOUT_MS ? "Zeitlimit" : label });
+      if (elapsed >= LOAD_TIMEOUT_MS) clearTimer(type);
     };
+    timerSetters[type]({ milliseconds: 0, running: true, finished: false, timedOut: false, status: label });
+    timerIntervalsRef.current[type] = window.setInterval(update, 50);
+    return start;
   }
 
-  function clearTimerInterval(
-    layerType,
-  ) {
-    const { intervalRef } =
-      getTimerConfiguration(layerType);
-
-    if (intervalRef.current) {
-      window.clearInterval(
-        intervalRef.current,
-      );
-
-      intervalRef.current = null;
-    }
-  }
-
-  function startMapTimer(
-    layerType,
-    statusText = "Lädt ...",
-  ) {
-    const {
-      intervalRef,
-      setTimer,
-    } = getTimerConfiguration(
-      layerType,
-    );
-
-    clearTimerInterval(layerType);
-
-    const startTime =
-      performance.now();
-
-    setTimer({
-      milliseconds: 0,
-      running: true,
-      finished: false,
-      timedOut: false,
-      status: statusText,
-    });
-
-    intervalRef.current =
-      window.setInterval(() => {
-        const elapsed =
-          performance.now() -
-          startTime;
-
-        if (elapsed >= LOAD_TIMEOUT_MS) {
-          window.clearInterval(
-            intervalRef.current,
-          );
-
-          intervalRef.current = null;
-
-          setTimer({
-            milliseconds:
-              LOAD_TIMEOUT_MS,
-
-            running: false,
-            finished: false,
-            timedOut: true,
-
-            status:
-              "Zeitlimit erreicht",
-          });
-
-          return;
-        }
-
-        setTimer({
-          milliseconds: elapsed,
-          running: true,
-          finished: false,
-          timedOut: false,
-          status: statusText,
-        });
-      }, 50);
-
-    return startTime;
-  }
-
-  function stopMapTimer(
-    layerType,
-    startTime,
-    timedOut = false,
-  ) {
-    const { setTimer } =
-      getTimerConfiguration(
-        layerType,
-      );
-
-    clearTimerInterval(layerType);
-
-    const elapsed = timedOut
-      ? LOAD_TIMEOUT_MS
-      : Math.min(
-          performance.now() -
-            startTime,
-          LOAD_TIMEOUT_MS,
-        );
-
-    setTimer({
-      milliseconds: elapsed,
+  function stopTimer(type, start, timedOut) {
+    clearTimer(type);
+    timerSetters[type]({
+      milliseconds: timedOut ? LOAD_TIMEOUT_MS : Math.min(performance.now() - start, LOAD_TIMEOUT_MS),
       running: false,
       finished: !timedOut,
       timedOut,
-
-      status: timedOut
-        ? "Zeitlimit erreicht"
-        : "Geladen",
+      status: timedOut ? "Zeitlimit" : "Geladen",
     });
   }
 
-  function resetMapTimers() {
-    clearTimerInterval("feature");
-    clearTimerInterval("parquet");
-
-    setFeatureTimer(
-      createInitialTimerState(),
-    );
-
-    setParquetTimer(
-      createInitialTimerState(),
-    );
+  function resetTimers() {
+    clearTimer("feature");
+    clearTimer("parquet");
+    setFeatureTimer(emptyTimer());
+    setParquetTimer(emptyTimer());
   }
 
-  function synchronizeViews(
-    sourceView,
-    targetView,
-  ) {
-    return reactiveUtils.watch(
-      () => sourceView.viewpoint,
-
-      (viewpoint) => {
-        if (
-          !viewpoint ||
-          synchronizationPausedRef.current ||
-          synchronizationLockRef.current
-        ) {
-          return;
-        }
-
-        synchronizationLockRef.current =
-          true;
-
-        targetView.viewpoint =
-          viewpoint.clone();
-
-        if (
-          synchronizationTimeoutRef.current
-        ) {
-          window.clearTimeout(
-            synchronizationTimeoutRef.current,
-          );
-        }
-
-        synchronizationTimeoutRef.current =
-          window.setTimeout(() => {
-            synchronizationLockRef.current =
-              false;
-          }, 50);
-      },
-    );
+  function synchronizeViews(source, target) {
+    return reactiveUtils.watch(() => source.viewpoint, (viewpoint) => {
+      if (!viewpoint || syncPausedRef.current || syncLockRef.current) return;
+      syncLockRef.current = true;
+      target.viewpoint = viewpoint.clone();
+      window.clearTimeout(syncTimeoutRef.current);
+      syncTimeoutRef.current = window.setTimeout(() => { syncLockRef.current = false; }, 50);
+    });
   }
 
   useEffect(() => {
     let cancelled = false;
-    let localFeatureView = null;
-    let localParquetView = null;
+    let featureView;
+    let parquetView;
 
-    async function initializeMaps() {
+    async function initialize() {
       try {
-        const featureContainer =
-          featureContainerRef.current;
+        if (!featureContainerRef.current || !parquetContainerRef.current) throw new Error("Kartencontainer fehlen.");
+        esriConfig.portalUrl = PORTAL_URL;
+        featureView = new MapView({ container: featureContainerRef.current, map: new Map({ basemap: "gray-vector" }), center: MAP_CENTER, zoom: INITIAL_ZOOM, constraints: { snapToZoom: false } });
+        parquetView = new MapView({ container: parquetContainerRef.current, map: new Map({ basemap: "gray-vector" }), center: MAP_CENTER, zoom: INITIAL_ZOOM, constraints: { snapToZoom: false } });
+        await Promise.all([featureView.when(), parquetView.when()]);
+        if (cancelled) return;
 
-        const parquetContainer =
-          parquetContainerRef.current;
-
-        if (
-          !(
-            featureContainer instanceof
-            HTMLElement
-          ) ||
-          !(
-            parquetContainer instanceof
-            HTMLElement
-          )
-        ) {
-          throw new Error(
-            "Die Kartencontainer sind noch nicht verfügbar.",
-          );
-        }
-
-        esriConfig.portalUrl =
-          PORTAL_URL;
-
-        const featureMap = new Map({
-          basemap: BASEMAP,
-        });
-
-        const parquetMap = new Map({
-          basemap: BASEMAP,
-        });
-
-        const commonViewProperties = {
-          center:
-            INITIAL_VIEWPOINT.center,
-
-          zoom:
-            INITIAL_VIEWPOINT.zoom,
-
-          constraints: {
-            snapToZoom: false,
-          },
-        };
-
-        const featureView =
-          new MapView({
-            ...commonViewProperties,
-
-            container:
-              featureContainer,
-
-            map:
-              featureMap,
-          });
-
-        const parquetView =
-          new MapView({
-            ...commonViewProperties,
-
-            container:
-              parquetContainer,
-
-            map:
-              parquetMap,
-          });
-
-        localFeatureView =
-          featureView;
-
-        localParquetView =
-          parquetView;
-
-        await Promise.all([
-          featureView.when(),
-          parquetView.when(),
-        ]);
-
-        if (cancelled) {
-          return;
-        }
-
-        const featureToParquetHandle =
-          synchronizeViews(
-            featureView,
-            parquetView,
-          );
-
-        const parquetToFeatureHandle =
-          synchronizeViews(
-            parquetView,
-            featureView,
-          );
-
-        const zoomHandle =
-          reactiveUtils.watch(
-            () => featureView.zoom,
-
-            (zoom) => {
-              if (Number.isFinite(zoom)) {
-                setCurrentZoom(
-                  Number(
-                    zoom.toFixed(2),
-                  ),
-                );
-              }
-            },
-
-            {
-              initial: true,
-            },
-          );
-
+        const featureToParquet = synchronizeViews(featureView, parquetView);
+        const parquetToFeature = synchronizeViews(parquetView, featureView);
+        const zoomHandle = reactiveUtils.watch(() => featureView.zoom, (zoom) => Number.isFinite(zoom) && setCurrentZoom(Number(zoom.toFixed(1))), { initial: true });
         runtimeRef.current = {
-          featureMap,
-          parquetMap,
-          featureView,
-          parquetView,
-
-          featureLayer: null,
-          parquetLayer: null,
-
-          featureLayerView: null,
-          parquetLayerView: null,
-
-          featureToParquetHandle,
-          parquetToFeatureHandle,
-          zoomHandle,
+          featureView, parquetView, featureMap: featureView.map, parquetMap: parquetView.map,
+          featureLayer: null, parquetLayer: null, featureLayerView: null, parquetLayerView: null,
+          handles: [featureToParquet, parquetToFeature, zoomHandle],
         };
-
         setReady(true);
-
-        setStatus(
-          "Bereit für die Analyse",
-        );
+        setStatus("Bereit zum Start");
       } catch (cause) {
-        if (cancelled) {
-          return;
-        }
-
-        console.error(
-          "ArcGIS initialization failed:",
-          cause,
-        );
-
-        setError(
-          formatArcGISError(cause),
-        );
-
-        setStatus(
-          "Initialisierung fehlgeschlagen",
-        );
+        if (!cancelled) { setError(formatError(cause)); setStatus("Initialisierung fehlgeschlagen"); }
       }
     }
 
-    initializeMaps();
-
+    initialize();
     return () => {
       cancelled = true;
-
-      clearTimerInterval("feature");
-      clearTimerInterval("parquet");
-
-      const runtime =
-        runtimeRef.current;
-
-      runtime
-        ?.featureToParquetHandle
-        ?.remove();
-
-      runtime
-        ?.parquetToFeatureHandle
-        ?.remove();
-
-      runtime
-        ?.zoomHandle
-        ?.remove();
-
-      if (
-        synchronizationTimeoutRef.current
-      ) {
-        window.clearTimeout(
-          synchronizationTimeoutRef.current,
-        );
-      }
-
-      localFeatureView?.destroy();
-      localParquetView?.destroy();
-
+      clearTimer("feature");
+      clearTimer("parquet");
+      runtimeRef.current?.handles.forEach((handle) => handle.remove());
+      window.clearTimeout(syncTimeoutRef.current);
+      featureView?.destroy();
+      parquetView?.destroy();
       runtimeRef.current = null;
     };
   }, []);
 
-  function createTestLayers(dataset) {
-    const featureLayer =
-      new FeatureLayer({
-        title:
-          `${dataset.label} Deutschland Feature Layer`,
-
-        portalItem: {
-          id:
-            dataset.featureLayerItemId,
-        },
-
-        outFields: [],
-
-        renderer: createRenderer(
-          dataset.geometryType,
-          [0, 122, 194, 0.72],
-        ),
-
-        popupEnabled: false,
-        visible: true,
-        minScale: 0,
-        maxScale: 0,
-      });
-
-    const parquetLayer =
-      new ParquetLayer({
-        title:
-          `${dataset.label} Deutschland GeoParquet`,
-
-        data:
-          new ParquetPortalItemData({
-            portalItem: {
-              id:
-                dataset.parquetItemId,
-            },
-          }),
-
-        renderer: createRenderer(
-          dataset.geometryType,
-          [230, 112, 30, 0.72],
-        ),
-
-        popupEnabled: false,
-        visible: true,
-        minScale: 0,
-        maxScale: 0,
-      });
-
+  function createLayers(selected) {
     return {
-      featureLayer,
-      parquetLayer,
+      featureLayer: new FeatureLayer({
+        title: `${selected.label} Feature Layer`, portalItem: { id: selected.featureLayerItemId }, outFields: [],
+        renderer: createRenderer(selected.geometryType, [18, 105, 255, 0.78]), popupEnabled: false,
+      }),
+      parquetLayer: new ParquetLayer({
+        title: `${selected.label} GeoParquet`, data: new ParquetPortalItemData({ portalItem: { id: selected.parquetItemId } }),
+        renderer: createRenderer(selected.geometryType, [249, 115, 22, 0.82]), popupEnabled: false,
+      }),
     };
   }
 
-  async function removeTestLayers() {
-    const runtime =
-      runtimeRef.current;
-
-    if (!runtime) {
-      return;
-    }
-
+  async function removeLayers() {
+    const runtime = runtimeRef.current;
+    if (!runtime) return;
     runtime.featureLayerView = null;
     runtime.parquetLayerView = null;
-
-    if (runtime.featureLayer) {
-      runtime.featureMap.remove(
-        runtime.featureLayer,
-      );
-
-      runtime.featureLayer.destroy();
-      runtime.featureLayer = null;
+    for (const type of ["feature", "parquet"]) {
+      const layer = runtime[`${type}Layer`];
+      if (layer) {
+        runtime[`${type}Map`].remove(layer);
+        layer.destroy();
+        runtime[`${type}Layer`] = null;
+      }
     }
-
-    if (runtime.parquetLayer) {
-      runtime.parquetMap.remove(
-        runtime.parquetLayer,
-      );
-
-      runtime.parquetLayer.destroy();
-      runtime.parquetLayer = null;
-    }
-
-    await waitForFrames(2);
+    await waitForFrames();
   }
 
-  async function setBothViewpoints(
-    zoom,
-  ) {
-    const runtime =
-      runtimeRef.current;
-
-    if (!runtime) {
-      throw new Error(
-        "Die Karten wurden noch nicht initialisiert.",
-      );
-    }
-
-    synchronizationPausedRef.current =
-      true;
-
+  async function setViewpoints(zoom) {
+    const runtime = runtimeRef.current;
+    if (!runtime) throw new Error("Die Karten sind noch nicht bereit.");
+    syncPausedRef.current = true;
     try {
-      await Promise.all([
-        runtime.featureView.goTo(
-          {
-            center: MAP_CENTER,
-            zoom,
-          },
-          {
-            animate: false,
-          },
-        ),
-
-        runtime.parquetView.goTo(
-          {
-            center: MAP_CENTER,
-            zoom,
-          },
-          {
-            animate: false,
-          },
-        ),
-      ]);
-
-      await Promise.all([
-        reactiveUtils.whenOnce(
-          () =>
-            runtime.featureView
-              .stationary,
-        ),
-
-        reactiveUtils.whenOnce(
-          () =>
-            runtime.parquetView
-              .stationary,
-        ),
-      ]);
-
+      await Promise.all(["feature", "parquet"].map((type) => runtime[`${type}View`].goTo({ center: MAP_CENTER, zoom }, { animate: false })));
+      await Promise.all(["feature", "parquet"].map((type) => reactiveUtils.whenOnce(() => runtime[`${type}View`].stationary)));
       setCurrentZoom(zoom);
     } finally {
-      await waitForFrames(1);
-
-      synchronizationPausedRef.current =
-        false;
-
-      synchronizationLockRef.current =
-        false;
+      syncPausedRef.current = false;
+      syncLockRef.current = false;
     }
   }
 
-  async function loadLayerForBenchmark({
-    name,
-    layerType,
-    view,
-    map,
-    layer,
-  }) {
-    const startTime =
-      startMapTimer(
-        layerType,
-        "Lädt ...",
-      );
-
+  async function loadLayer(type, layer) {
+    const runtime = runtimeRef.current;
+    const label = type === "feature" ? "Feature Layer" : "GeoParquet";
+    const start = startTimer(type, "Lädt …");
     let layerView = null;
     let timedOut = false;
-
-    map.add(layer);
-
+    runtime[`${type}Map`].add(layer);
     try {
-      /*
-       * Das gesamte Laden einschließlich LayerView und
-       * Darstellung besitzt zusammen ein Limit von 30 Sekunden.
-       */
-      await withTimeout(
-        (async () => {
-          setStatus(
-            `${name}: Layer wird geladen ...`,
-          );
-
-          await layer.load();
-
-          layerView =
-            await view.whenLayerView(
-              layer,
-            );
-
-          await waitForFrames(2);
-
-          setStatus(
-            `${name}: Darstellung läuft ...`,
-          );
-
-          await waitForLayerViewReady({
-            view,
-            layerView,
-          });
-
-          await waitForFrames(2);
-        })(),
-
-        LOAD_TIMEOUT_MS,
-
-        `${name}: Zeitlimit von 30 Sekunden erreicht.`,
-      );
+      await withTimeout((async () => {
+        setStatus(`${label} wird geladen …`);
+        await layer.load();
+        layerView = await runtime[`${type}View`].whenLayerView(layer);
+        await waitForFrames();
+        await waitForLayerView(runtime[`${type}View`], layerView);
+        await waitForFrames();
+      })(), `${label}: Zeitlimit erreicht.`);
     } catch (cause) {
       timedOut = true;
-
-      console.warn(
-        `${name} hat das Zeitlimit erreicht:`,
-        cause,
-      );
+      console.warn(`${label}:`, cause);
     }
-
-    const duration = timedOut
-      ? LOAD_TIMEOUT_MS
-      : Math.min(
-          performance.now() -
-            startTime,
-          LOAD_TIMEOUT_MS,
-        );
-
-    stopMapTimer(
-      layerType,
-      startTime,
-      timedOut,
-    );
-
-    return {
-      duration,
-      timedOut,
-      layerView,
-
-      hasAllFeaturesInView:
-        layerView &&
-        "hasAllFeaturesInView" in
-          layerView
-          ? layerView
-              .hasAllFeaturesInView
-          : null,
-
-      maximumNumberOfFeaturesExceeded:
-        layerView &&
-        "maximumNumberOfFeaturesExceeded" in
-          layerView
-          ? layerView
-              .maximumNumberOfFeaturesExceeded
-          : null,
-    };
+    stopTimer(type, start, timedOut);
+    return { duration: timedOut ? LOAD_TIMEOUT_MS : Math.min(performance.now() - start, LOAD_TIMEOUT_MS), timedOut, layerView };
   }
 
-  async function measureZoomForLayer({
-    name,
-    layerType,
-    view,
-    layerView,
-    zoom,
-  }) {
-    const startTime =
-      startMapTimer(
-        layerType,
-        `Zoom ${zoom} lädt ...`,
-      );
-
+  async function measureZoom(type, zoom) {
+    const runtime = runtimeRef.current;
+    const start = startTimer(type, `Zoom ${zoom} …`);
     let timedOut = false;
-
     try {
-      await withTimeout(
-        (async () => {
-          if (!layerView) {
-            throw new Error(
-              `${name}: Keine LayerView verfügbar.`,
-            );
-          }
-
-          await view.goTo(
-            {
-              center: MAP_CENTER,
-              zoom,
-            },
-            {
-              animate: false,
-            },
-          );
-
-          await waitForLayerViewReady({
-            view,
-            layerView,
-          });
-
-          await waitForFrames(2);
-        })(),
-
-        LOAD_TIMEOUT_MS,
-
-        `${name}: Zeitlimit von 30 Sekunden bei Zoom ${zoom} erreicht.`,
-      );
+      await withTimeout((async () => {
+        const layerView = runtime[`${type}LayerView`];
+        if (!layerView) throw new Error("Keine LayerView verfügbar.");
+        await runtime[`${type}View`].goTo({ center: MAP_CENTER, zoom }, { animate: false });
+        await waitForLayerView(runtime[`${type}View`], layerView);
+        await waitForFrames();
+      })(), `Zoom ${zoom}: Zeitlimit erreicht.`);
     } catch (cause) {
       timedOut = true;
-
-      console.warn(
-        `${name}, Zoom ${zoom}:`,
-        cause,
-      );
+      console.warn(`${type}, Zoom ${zoom}:`, cause);
     }
-
-    const duration = timedOut
-      ? LOAD_TIMEOUT_MS
-      : Math.min(
-          performance.now() -
-            startTime,
-          LOAD_TIMEOUT_MS,
-        );
-
-    stopMapTimer(
-      layerType,
-      startTime,
-      timedOut,
-    );
-
-    return {
-      duration,
-      timedOut,
-
-      hasAllFeaturesInView:
-        layerView &&
-        "hasAllFeaturesInView" in
-          layerView
-          ? layerView
-              .hasAllFeaturesInView
-          : null,
-
-      maximumNumberOfFeaturesExceeded:
-        layerView &&
-        "maximumNumberOfFeaturesExceeded" in
-          layerView
-          ? layerView
-              .maximumNumberOfFeaturesExceeded
-          : null,
-    };
-  }
-
-  async function measureZoomStage(
-    stage,
-  ) {
-    const runtime =
-      runtimeRef.current;
-
-    if (!runtime) {
-      throw new Error(
-        "Die Karten wurden noch nicht initialisiert.",
-      );
-    }
-
-    setStatus(
-      `${stage.label}: Zoom ${stage.zoom} wird getestet ...`,
-    );
-
-    synchronizationPausedRef.current =
-      true;
-
-    try {
-      const [
-        featureResult,
-        parquetResult,
-      ] = await Promise.all([
-        measureZoomForLayer({
-          name: "Feature Layer",
-          layerType: "feature",
-          view: runtime.featureView,
-
-          layerView:
-            runtime.featureLayerView,
-
-          zoom: stage.zoom,
-        }),
-
-        measureZoomForLayer({
-          name: "GeoParquet",
-          layerType: "parquet",
-          view: runtime.parquetView,
-
-          layerView:
-            runtime.parquetLayerView,
-
-          zoom: stage.zoom,
-        }),
-      ]);
-
-      setCurrentZoom(stage.zoom);
-
-      const result = {
-        stageId: stage.id,
-        label: stage.label,
-
-        description:
-          stage.description,
-
-        zoom:
-          stage.zoom,
-
-        featureMs:
-          featureResult.duration,
-
-        parquetMs:
-          parquetResult.duration,
-
-        featureTimedOut:
-          featureResult.timedOut,
-
-        parquetTimedOut:
-          parquetResult.timedOut,
-
-        differenceMs:
-          Math.abs(
-            featureResult.duration -
-              parquetResult.duration,
-          ),
-
-        featureAllFeaturesInView:
-          featureResult
-            .hasAllFeaturesInView,
-
-        featureLimitExceeded:
-          featureResult
-            .maximumNumberOfFeaturesExceeded,
-
-        parquetAllFeaturesInView:
-          parquetResult
-            .hasAllFeaturesInView,
-
-        parquetLimitExceeded:
-          parquetResult
-            .maximumNumberOfFeaturesExceeded,
-      };
-
-      result.winner = getWinner({
-        featureMilliseconds:
-          result.featureMs,
-
-        parquetMilliseconds:
-          result.parquetMs,
-
-        featureTimedOut:
-          result.featureTimedOut,
-
-        parquetTimedOut:
-          result.parquetTimedOut,
-      });
-
-      return result;
-    } finally {
-      synchronizationPausedRef.current =
-        false;
-
-      synchronizationLockRef.current =
-        false;
-    }
-  }
-
-  async function handleDatasetChange(
-    event,
-  ) {
-    const nextDatasetId =
-      event.target.value;
-
-    if (
-      nextDatasetId ===
-        selectedDatasetId ||
-      running
-    ) {
-      return;
-    }
-
-    try {
-      resetMapTimers();
-      setError("");
-
-      setStatus(
-        "Datensatz wird gewechselt ...",
-      );
-
-      await removeTestLayers();
-
-      await setBothViewpoints(
-        INITIAL_VIEWPOINT.zoom,
-      );
-
-      historyRef.current = [];
-
-      setSelectedDatasetId(
-        nextDatasetId,
-      );
-
-      setResults([]);
-      setHistory([]);
-
-      setStatus(
-        "Bereit für die Analyse",
-      );
-    } catch (cause) {
-      console.error(
-        "Dataset change failed:",
-        cause,
-      );
-
-      setError(
-        formatArcGISError(cause),
-      );
-
-      setStatus(
-        "Datensatzwechsel fehlgeschlagen",
-      );
-    }
+    stopTimer(type, start, timedOut);
+    return { duration: timedOut ? LOAD_TIMEOUT_MS : Math.min(performance.now() - start, LOAD_TIMEOUT_MS), timedOut };
   }
 
   async function runComparison() {
-    const runtime =
-      runtimeRef.current;
-
-    if (!runtime || running) {
-      return;
-    }
-
-    const dataset =
-      DATASETS[selectedDatasetId];
-
+    const runtime = runtimeRef.current;
+    if (!runtime || running) return;
     setRunning(true);
     setError("");
     setResults([]);
-
-    resetMapTimers();
-
+    resetTimers();
     try {
-      setStatus(
-        "Vorherige Layer werden entfernt ...",
-      );
+      await removeLayers();
+      await setViewpoints(INITIAL_ZOOM);
+      const layers = createLayers(dataset);
+      runtime.featureLayer = layers.featureLayer;
+      runtime.parquetLayer = layers.parquetLayer;
 
-      await removeTestLayers();
+      setStatus("1/3 · Deutschland wird gemessen");
+      const [featureLoad, parquetLoad] = await Promise.all([loadLayer("feature", layers.featureLayer), loadLayer("parquet", layers.parquetLayer)]);
+      runtime.featureLayerView = featureLoad.layerView;
+      runtime.parquetLayerView = parquetLoad.layerView;
+      const completed = [resultFrom(STAGES[0], featureLoad, parquetLoad)];
+      setResults([...completed]);
 
-      await setBothViewpoints(
-        INITIAL_VIEWPOINT.zoom,
-      );
-
-      const {
-        featureLayer,
-        parquetLayer,
-      } = createTestLayers(
-        dataset,
-      );
-
-      runtime.featureLayer =
-        featureLayer;
-
-      runtime.parquetLayer =
-        parquetLayer;
-
-      setStatus(
-        "Deutschland: Erstmaliges Laden der Layer ...",
-      );
-
-      const [
-        featureLoadResult,
-        parquetLoadResult,
-      ] = await Promise.all([
-        loadLayerForBenchmark({
-          name: "Feature Layer",
-          layerType: "feature",
-          view: runtime.featureView,
-          map: runtime.featureMap,
-          layer: featureLayer,
-        }),
-
-        loadLayerForBenchmark({
-          name: "GeoParquet",
-          layerType: "parquet",
-          view: runtime.parquetView,
-          map: runtime.parquetMap,
-          layer: parquetLayer,
-        }),
-      ]);
-
-      runtime.featureLayerView =
-        featureLoadResult.layerView;
-
-      runtime.parquetLayerView =
-        parquetLoadResult.layerView;
-
-      const germanyStage =
-        ZOOM_STAGES[0];
-
-      const germanyResultObject = {
-        stageId:
-          germanyStage.id,
-
-        label:
-          germanyStage.label,
-
-        description:
-          germanyStage.description,
-
-        zoom:
-          germanyStage.zoom,
-
-        featureMs:
-          featureLoadResult.duration,
-
-        parquetMs:
-          parquetLoadResult.duration,
-
-        featureTimedOut:
-          featureLoadResult.timedOut,
-
-        parquetTimedOut:
-          parquetLoadResult.timedOut,
-
-        differenceMs:
-          Math.abs(
-            featureLoadResult.duration -
-              parquetLoadResult.duration,
-          ),
-
-        featureAllFeaturesInView:
-          featureLoadResult
-            .hasAllFeaturesInView,
-
-        featureLimitExceeded:
-          featureLoadResult
-            .maximumNumberOfFeaturesExceeded,
-
-        parquetAllFeaturesInView:
-          parquetLoadResult
-            .hasAllFeaturesInView,
-
-        parquetLimitExceeded:
-          parquetLoadResult
-            .maximumNumberOfFeaturesExceeded,
-      };
-
-      germanyResultObject.winner =
-        getWinner({
-          featureMilliseconds:
-            germanyResultObject
-              .featureMs,
-
-          parquetMilliseconds:
-            germanyResultObject
-              .parquetMs,
-
-          featureTimedOut:
-            germanyResultObject
-              .featureTimedOut,
-
-          parquetTimedOut:
-            germanyResultObject
-              .parquetTimedOut,
-        });
-
-      setResults([
-        germanyResultObject,
-      ]);
-
-      const regionalResult =
-        await measureZoomStage(
-          ZOOM_STAGES[1],
-        );
-
-      setResults([
-        germanyResultObject,
-        regionalResult,
-      ]);
-
-      const localResult =
-        await measureZoomStage(
-          ZOOM_STAGES[2],
-        );
-
-      const completedResults = [
-        germanyResultObject,
-        regionalResult,
-        localResult,
-      ];
-
-      setResults(
-        completedResults,
-      );
-
-      const existingRuns =
-        historyRef.current.map(
-          (entry) => entry.run,
-        );
-
-      const runNumber =
-        existingRuns.length === 0
-          ? 1
-          : Math.max(
-              ...existingRuns,
-            ) + 1;
-
-      const timestamp =
-        new Date().toISOString();
-
-      const historyEntries =
-        completedResults.map(
-          (stageResult) => ({
-            run: runNumber,
-            timestamp,
-
-            dataset:
-              dataset.label,
-
-            totalFeatures:
-              dataset.totalFeatures,
-
-            stage:
-              stageResult.label,
-
-            zoom:
-              stageResult.zoom,
-
-            featureSeconds:
-              Number(
-                (
-                  stageResult.featureMs /
-                  1000
-                ).toFixed(2),
-              ),
-
-            parquetSeconds:
-              Number(
-                (
-                  stageResult.parquetMs /
-                  1000
-                ).toFixed(2),
-              ),
-
-            differenceSeconds:
-              Number(
-                (
-                  stageResult.differenceMs /
-                  1000
-                ).toFixed(2),
-              ),
-
-            featureTimedOut:
-              stageResult
-                .featureTimedOut,
-
-            parquetTimedOut:
-              stageResult
-                .parquetTimedOut,
-
-            winner:
-              stageResult.winner,
-
-            featureAllFeaturesInView:
-              stageResult
-                .featureAllFeaturesInView,
-
-            featureLimitExceeded:
-              stageResult
-                .featureLimitExceeded,
-
-            parquetAllFeaturesInView:
-              stageResult
-                .parquetAllFeaturesInView,
-
-            parquetLimitExceeded:
-              stageResult
-                .parquetLimitExceeded,
-          }),
-        );
-
-      historyRef.current = [
-        ...historyRef.current,
-        ...historyEntries,
-      ];
-
-      setHistory(
-        historyRef.current,
-      );
-
-      setStatus(
-        "Analyse aller drei Zoomstufen abgeschlossen",
-      );
+      for (let index = 1; index < STAGES.length; index += 1) {
+        const stage = STAGES[index];
+        setStatus(`${index + 1}/3 · ${stage.label} wird gemessen`);
+        syncPausedRef.current = true;
+        const [feature, parquet] = await Promise.all([measureZoom("feature", stage.zoom), measureZoom("parquet", stage.zoom)]);
+        syncPausedRef.current = false;
+        syncLockRef.current = false;
+        completed.push(resultFrom(stage, feature, parquet));
+        setResults([...completed]);
+        setCurrentZoom(stage.zoom);
+      }
+      setStatus("Vergleich abgeschlossen");
     } catch (cause) {
-      console.error(
-        "Benchmark failed:",
-        cause,
-      );
-
-      setError(
-        formatArcGISError(cause),
-      );
-
-      setStatus(
-        "Analyse fehlgeschlagen",
-      );
+      setError(formatError(cause));
+      setStatus("Analyse fehlgeschlagen");
     } finally {
-      synchronizationPausedRef.current =
-        false;
-
-      synchronizationLockRef.current =
-        false;
-
+      syncPausedRef.current = false;
+      syncLockRef.current = false;
       setRunning(false);
     }
   }
 
   async function resetAnalysis() {
-    if (running) {
-      return;
-    }
-
+    if (running) return;
+    resetTimers();
+    setResults([]);
+    setError("");
     try {
-      resetMapTimers();
-
-      await removeTestLayers();
-
-      await setBothViewpoints(
-        INITIAL_VIEWPOINT.zoom,
-      );
-
-      historyRef.current = [];
-
-      setHistory([]);
-      setResults([]);
-      setError("");
-
-      setStatus(
-        "Bereit für die Analyse",
-      );
-    } catch (cause) {
-      console.error(
-        "Reset failed:",
-        cause,
-      );
-
-      setError(
-        formatArcGISError(cause),
-      );
-    }
+      await removeLayers();
+      await setViewpoints(INITIAL_ZOOM);
+      setStatus("Bereit zum Start");
+    } catch (cause) { setError(formatError(cause)); }
   }
 
-  function exportCsv() {
-    if (history.length === 0) {
-      return;
-    }
-
-    const columns =
-      Object.keys(history[0]);
-
-    function escapeCsvValue(value) {
-      const text =
-        String(value ?? "");
-
-      return `"${text.replaceAll(
-        '"',
-        '""',
-      )}"`;
-    }
-
-    const rows = history.map(
-      (row) =>
-        columns
-          .map((column) =>
-            escapeCsvValue(
-              row[column],
-            ),
-          )
-          .join(";"),
-    );
-
-    const csv = [
-      columns.join(";"),
-      ...rows,
-    ].join("\n");
-
-    const blob = new Blob(
-      ["\uFEFF" + csv],
-      {
-        type:
-          "text/csv;charset=utf-8",
-      },
-    );
-
-    const url =
-      URL.createObjectURL(blob);
-
-    const link =
-      document.createElement("a");
-
-    link.href = url;
-
-    link.download =
-      `${selectedDatasetId}-zoom-benchmark-${new Date()
-        .toISOString()
-        .slice(0, 10)}.csv`;
-
-    document.body.appendChild(link);
-
-    link.click();
-    link.remove();
-
-    URL.revokeObjectURL(url);
+  async function changeDataset(event) {
+    if (running) return;
+    setSelectedDatasetId(event.target.value);
+    resetTimers();
+    setResults([]);
+    setError("");
+    try {
+      await removeLayers();
+      await setViewpoints(INITIAL_ZOOM);
+      setStatus("Bereit zum Start");
+    } catch (cause) { setError(formatError(cause)); }
   }
 
-  function getDatasetSubtitle() {
-    return `${formatNumber(
-      selectedDataset.totalFeatures,
-    )} Features · Zoom ${currentZoom}`;
-  }
+  const activeStage = running ? Math.min(results.length, STAGES.length - 1) : -1;
 
   return (
-    <div className="min-h-screen overflow-x-hidden bg-gradient-to-br from-slate-50 via-blue-50/60 to-violet-50 text-slate-900">
-      <ParquetInfoModal
-        isOpen={showInfoModal}
-        onClose={() =>
-          setShowInfoModal(false)
-        }
-      />
-
-      <header className="sticky top-0 z-40 border-b border-white/60 bg-white/80 px-4 py-3 shadow-sm backdrop-blur-xl">
-        <div className="mx-auto flex max-w-[1800px] flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="relative">
-              <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-violet-500 to-cyan-400 opacity-40 blur-md" />
-
-              <div className="relative rounded-2xl bg-gradient-to-br from-violet-600 via-blue-600 to-cyan-500 p-2.5 text-white shadow-lg">
-                <MapIcon className="h-5 w-5" />
-              </div>
-            </div>
-
-            <div>
-              <h1 className="text-lg font-bold">
-                Feature Layer vs. GeoParquet
-              </h1>
-
-              <p className="text-xs text-slate-500">
-                Lade- und Zoom-Performance großer Deutschland-Datensätze
-              </p>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-2 rounded-xl border border-blue-200 bg-gradient-to-r from-blue-50 to-violet-50 px-3 py-2 shadow-sm transition hover:shadow-md">
-              <span className="text-xs font-medium text-slate-500">
-                Datensatz
-              </span>
-
-              <select
-                value={
-                  selectedDatasetId
-                }
-                onChange={
-                  handleDatasetChange
-                }
-                disabled={running}
-                className="bg-transparent text-sm font-semibold text-slate-900 outline-none disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <option value="haltestellen">
-                  Haltestellen
-                </option>
-
-                <option value="radwege">
-                  Radwege
-                </option>
-              </select>
-            </label>
-
-            <button
-              type="button"
-              onClick={() =>
-                setShowInfoModal(true)
-              }
-              className="flex items-center gap-2 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-sm font-semibold text-violet-700 transition hover:-translate-y-0.5 hover:bg-violet-100"
-            >
-              <Info className="h-4 w-4" />
-              Was ist Parquet?
-            </button>
-
-            <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
-              Zoom: {currentZoom}
-            </div>
-
-            <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
-              Zeitlimit: 30 s
-            </div>
-
-            <span
-              className={`rounded-full px-3 py-1 text-xs font-medium ${
-                running
-                  ? "bg-amber-100 text-amber-800"
-                  : ready
-                    ? "bg-emerald-100 text-emerald-800"
-                    : "bg-slate-200 text-slate-700"
-              }`}
-            >
-              {status}
-            </span>
-
-            <button
-              type="button"
-              onClick={
-                resetAnalysis
-              }
-              disabled={
-                !ready || running
-              }
-              className="flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium shadow-sm transition hover:-translate-y-0.5 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <RotateCcw className="h-4 w-4" />
-              Zurücksetzen
-            </button>
-
-            <button
-              type="button"
-              onClick={
-                runComparison
-              }
-              disabled={
-                !ready || running
-              }
-              className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 via-blue-600 to-cyan-500 px-5 py-2 text-sm font-semibold text-white shadow-lg shadow-blue-500/20 transition hover:-translate-y-0.5 hover:shadow-xl disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Play className="h-4 w-4" />
-
-              {running
-                ? "Analyse läuft"
-                : "3 Zoomstufen analysieren"}
-            </button>
-          </div>
-        </div>
+    <div className="app-shell">
+      {showInfo && <InfoModal onClose={() => setShowInfo(false)} />}
+      <header className="app-header">
+        <div className="brand-mark"><MapIcon size={22} /></div>
+        <div className="brand-copy"><h1>GeoParquet Speed Test</h1><p>Gleiche Daten. Zwei Layer-Typen. Ein direkter Ladezeitvergleich.</p></div>
+        <div className={`status-pill ${running ? "running" : ready ? "ready" : ""}`}><span />{status}</div>
+        <button className="icon-button" onClick={() => setShowInfo(true)} aria-label="Über GeoParquet"><CircleHelp size={19} /></button>
       </header>
 
-      <main className="relative mx-auto max-w-[1800px] p-4 sm:p-6">
-        <div className="pointer-events-none absolute left-0 top-20 -z-10 h-72 w-72 rounded-full bg-violet-300/20 blur-3xl" />
+      <main className="dashboard">
+        <aside className="control-panel">
+          <div className="panel-kicker">So funktioniert’s</div>
+          <h2>In drei Schritten zum Ergebnis</h2>
+          <ol className="workflow">
+            <li className="current"><span>1</span><div><strong>Datensatz wählen</strong><small>Beide Layer enthalten identische Daten.</small></div></li>
+            <li className={results.length ? "done" : running ? "current" : ""}><span>{results.length ? <Check size={14} /> : "2"}</span><div><strong>Benchmark starten</strong><small>Die App lädt beide Layer gleichzeitig.</small></div></li>
+            <li className={results.length === 3 ? "done" : running && results.length ? "current" : ""}><span>{results.length === 3 ? <Check size={14} /> : "3"}</span><div><strong>Zeiten vergleichen</strong><small>Drei Zoomstufen zeigen die Performance.</small></div></li>
+          </ol>
+          <label className="dataset-field">
+            <span>Testdatensatz</span>
+            <select value={selectedDatasetId} onChange={changeDataset} disabled={running}>
+              {Object.entries(DATASETS).map(([id, item]) => <option key={id} value={id}>{item.label}</option>)}
+            </select>
+            <small>{numberFormatter.format(dataset.totalFeatures)} Features · deutschlandweit</small>
+          </label>
+          <button className="run-button" onClick={runComparison} disabled={!ready || running}><Play size={18} fill="currentColor" />{running ? "Benchmark läuft …" : results.length ? "Erneut vergleichen" : "Vergleich starten"}</button>
+          <button className="reset-button" onClick={resetAnalysis} disabled={!ready || running || !results.length}><RotateCcw size={15} /> Ergebnis zurücksetzen</button>
+          <div className="test-note"><Info size={16} /><p>Gemessen wird bis beide Karten fertig gezeichnet sind. Zeitlimit: 30 Sekunden.</p></div>
+        </aside>
 
-        <div className="pointer-events-none absolute right-0 top-96 -z-10 h-80 w-80 rounded-full bg-cyan-300/20 blur-3xl" />
-
-        {error && (
-          <div className="mb-4 flex items-start gap-2 rounded-2xl border border-red-200 bg-red-50/90 p-3 text-sm text-red-800 shadow-lg backdrop-blur">
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-            <span>{error}</span>
+        <section className="comparison-panel" aria-label="Synchronisierte Kartenansichten">
+          <div className="comparison-heading"><div><span className="panel-kicker">Live-Vergleich</span><h2>{dataset.description}</h2></div><span className="sync-label"><Zap size={14} /> Karten sind synchronisiert</span></div>
+          <div className="maps-grid">
+            <MapPanel type="feature" dataset={dataset} zoom={currentZoom} timer={featureTimer} containerRef={featureContainerRef} />
+            <div className="versus">VS</div>
+            <MapPanel type="parquet" dataset={dataset} zoom={currentZoom} timer={parquetTimer} containerRef={parquetContainerRef} />
           </div>
-        )}
-
-        <section className="mb-4 overflow-hidden rounded-[1.75rem] border border-white/70 bg-gradient-to-r from-blue-600 via-violet-600 to-cyan-500 p-[1px] shadow-xl shadow-blue-900/10">
-          <div className="rounded-[calc(1.75rem-1px)] bg-white/92 p-5 backdrop-blur-xl">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <p className="font-semibold text-slate-950">
-                  {selectedDataset.description}
-                </p>
-
-                <p className="mt-1 max-w-4xl text-sm leading-6 text-slate-600">
-                  Verglichen werden dieselben Geodaten als
-                  klassischer ArcGIS Feature Layer und als
-                  Parquet Feature Layer. Die Analyse misst
-                  das erstmalige Laden sowie die
-                  Aktualisierung bei zwei weiteren
-                  Zoomstufen.
-                </p>
-              </div>
-
-              <div className="rounded-2xl border border-blue-100 bg-gradient-to-br from-blue-50 to-violet-50 px-6 py-3 text-center shadow-sm">
-                <p className="text-2xl font-bold text-blue-700">
-                  {formatNumber(
-                    selectedDataset
-                      .totalFeatures,
-                  )}
-                </p>
-
-                <p className="text-xs font-medium text-slate-500">
-                  Features im Test
-                </p>
-              </div>
-            </div>
-          </div>
+          {error && <div className="error-banner"><Info size={16} />{error}</div>}
         </section>
 
-        <section className="mb-4 grid gap-3 md:grid-cols-3">
-          <StatCard
-            title={`${selectedDataset.label} · Feature Layer`}
-            value={
-              !germanyResult
-                ? "–"
-                : germanyResult
-                      .featureTimedOut
-                  ? "> 30,00 s"
-                  : `${formatSeconds(
-                      germanyResult
-                        .featureMs,
-                    )} s`
-            }
-            subtitle={
-              !germanyResult
-                ? "Erstmaliges Laden bei Zoom 5"
-                : getCompletenessText({
-                    timedOut:
-                      germanyResult
-                        .featureTimedOut,
-
-                    hasAllFeaturesInView:
-                      germanyResult
-                        .featureAllFeaturesInView,
-
-                    maximumNumberOfFeaturesExceeded:
-                      germanyResult
-                        .featureLimitExceeded,
-                  })
-            }
-            active={running}
-            winner={
-              germanyWinnerKey ===
-              "feature"
-            }
-            warning={
-              germanyResult
-                ?.featureTimedOut
-            }
-            color="blue"
-          />
-
-          <StatCard
-            title={`${selectedDataset.label} · GeoParquet`}
-            value={
-              !germanyResult
-                ? "–"
-                : germanyResult
-                      .parquetTimedOut
-                  ? "> 30,00 s"
-                  : `${formatSeconds(
-                      germanyResult
-                        .parquetMs,
-                    )} s`
-            }
-            subtitle={
-              !germanyResult
-                ? "Erstmaliges Laden bei Zoom 5"
-                : getCompletenessText({
-                    timedOut:
-                      germanyResult
-                        .parquetTimedOut,
-
-                    hasAllFeaturesInView:
-                      germanyResult
-                        .parquetAllFeaturesInView,
-
-                    maximumNumberOfFeaturesExceeded:
-                      germanyResult
-                        .parquetLimitExceeded,
-                  })
-            }
-            active={running}
-            winner={
-              germanyWinnerKey ===
-              "parquet"
-            }
-            warning={
-              germanyResult
-                ?.parquetTimedOut
-            }
-            color="orange"
-          />
-
-          <StatCard
-            title="Ergebnis · Deutschland"
-            value={
-              !germanyResult
-                ? "–"
-                : germanyResult
-                      .featureTimedOut ||
-                    germanyResult
-                      .parquetTimedOut
-                  ? "Zeitlimit erreicht"
-                  : `${formatSeconds(
-                      germanyResult
-                        .differenceMs,
-                    )} s`
-            }
-            subtitle={
-              !germanyResult
-                ? "Noch keine Analyse"
-                : germanyResult.winner ===
-                    "Gleichstand"
-                  ? "Gleichstand"
-                  : `${germanyResult.winner} schneller`
-            }
-            color="violet"
-          />
-        </section>
-
-        <section className="grid h-[58vh] min-h-[470px] gap-4 lg:grid-cols-2">
-          <div className="group relative overflow-hidden rounded-[1.75rem] border border-blue-200/70 bg-white shadow-xl shadow-blue-900/10 ring-1 ring-white transition hover:-translate-y-0.5 hover:shadow-2xl">
-            <MapLabel
-              title={`${selectedDataset.label} · Feature Layer`}
-              subtitle={
-                getDatasetSubtitle()
-              }
-              color="blue"
-            />
-
-            <div
-              ref={
-                featureContainerRef
-              }
-              className="h-full w-full"
-            />
-
-            <MapTimer
-              timer={featureTimer}
-              color="blue"
-            />
-          </div>
-
-          <div className="group relative overflow-hidden rounded-[1.75rem] border border-orange-200/70 bg-white shadow-xl shadow-orange-900/10 ring-1 ring-white transition hover:-translate-y-0.5 hover:shadow-2xl">
-            <MapLabel
-              title={`${selectedDataset.label} · GeoParquet`}
-              subtitle={
-                getDatasetSubtitle()
-              }
-              color="orange"
-            />
-
-            <div
-              ref={
-                parquetContainerRef
-              }
-              className="h-full w-full"
-            />
-
-            <MapTimer
-              timer={parquetTimer}
-              color="orange"
-            />
-          </div>
-        </section>
-
-        <section className="mt-6">
-          <div className="mb-3">
-            <h2 className="text-lg font-bold text-slate-900">
-              Verhalten beim Zoomen
-            </h2>
-
-            <p className="text-sm text-slate-500">
-              Vergleich der Lade- und
-              Aktualisierungszeiten in drei
-              Maßstabsstufen.
-            </p>
-          </div>
-
-          <div className="grid gap-3 lg:grid-cols-3">
-            {results.length === 0
-              ? ZOOM_STAGES.map(
-                  (stage) => (
-                    <div
-                      key={stage.id}
-                      className="rounded-[1.5rem] border border-dashed border-slate-300 bg-white/70 p-4 shadow-sm backdrop-blur"
-                    >
-                      <p className="font-semibold text-slate-500">
-                        {stage.label}
-                      </p>
-
-                      <p className="mt-1 text-xs text-slate-400">
-                        Zoom {stage.zoom} ·{" "}
-                        {stage.description}
-                      </p>
-
-                      <p className="mt-5 text-sm text-slate-400">
-                        Noch nicht analysiert
-                      </p>
-                    </div>
-                  ),
-                )
-              : results.map(
-                  (stageResult) => (
-                    <ZoomResultCard
-                      key={
-                        stageResult
-                          .stageId
-                      }
-                      result={
-                        stageResult
-                      }
-                    />
-                  ),
-                )}
-          </div>
-        </section>
-
-        <section className="mt-6 overflow-hidden rounded-[1.75rem] border border-white/80 bg-white/85 shadow-xl shadow-slate-900/5 backdrop-blur">
-          <div className="flex items-center justify-between border-b border-slate-200/80 p-4">
-            <div className="flex items-center gap-2">
-              <div className="rounded-xl bg-blue-100 p-2 text-blue-600">
-                <Timer className="h-5 w-5" />
-              </div>
-
-              <div>
-                <h2 className="font-bold">
-                  Messverlauf
-                </h2>
-
-                <p className="text-xs text-slate-500">
-                  Ergebnisse der aktuellen Sitzung
-                </p>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={exportCsv}
-              disabled={
-                history.length === 0
-              }
-              className="flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium shadow-sm transition hover:-translate-y-0.5 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              <Download className="h-4 w-4" />
-              CSV exportieren
-            </button>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[1050px] text-left text-sm">
-              <thead className="bg-slate-50/80 text-xs uppercase text-slate-500">
-                <tr>
-                  <th className="px-4 py-3">
-                    Lauf
-                  </th>
-
-                  <th className="px-4 py-3">
-                    Datensatz
-                  </th>
-
-                  <th className="px-4 py-3">
-                    Teststufe
-                  </th>
-
-                  <th className="px-4 py-3">
-                    Zoom
-                  </th>
-
-                  <th className="px-4 py-3">
-                    Feature Layer
-                  </th>
-
-                  <th className="px-4 py-3">
-                    GeoParquet
-                  </th>
-
-                  <th className="px-4 py-3">
-                    Differenz
-                  </th>
-
-                  <th className="px-4 py-3">
-                    Gewinner
-                  </th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {history.length === 0 ? (
-                  <tr>
-                    <td
-                      colSpan={8}
-                      className="px-4 py-10 text-center text-slate-400"
-                    >
-                      Noch keine Analysen vorhanden
-                    </td>
-                  </tr>
-                ) : (
-                  history
-                    .slice()
-                    .reverse()
-                    .map(
-                      (
-                        row,
-                        index,
-                      ) => (
-                        <tr
-                          key={`${row.timestamp}-${row.dataset}-${row.stage}-${index}`}
-                          className="border-t border-slate-100 transition hover:bg-blue-50/40"
-                        >
-                          <td className="px-4 py-3 font-medium">
-                            {row.run}
-                          </td>
-
-                          <td className="px-4 py-3">
-                            {row.dataset}
-                          </td>
-
-                          <td className="px-4 py-3">
-                            {row.stage}
-                          </td>
-
-                          <td className="px-4 py-3">
-                            {row.zoom}
-                          </td>
-
-                          <td className="px-4 py-3">
-                            {row.featureTimedOut
-                              ? "> 30,00 s"
-                              : `${new Intl.NumberFormat(
-                                  "de-DE",
-                                  {
-                                    minimumFractionDigits: 2,
-                                    maximumFractionDigits: 2,
-                                  },
-                                ).format(
-                                  row.featureSeconds,
-                                )} s`}
-                          </td>
-
-                          <td className="px-4 py-3">
-                            {row.parquetTimedOut
-                              ? "> 30,00 s"
-                              : `${new Intl.NumberFormat(
-                                  "de-DE",
-                                  {
-                                    minimumFractionDigits: 2,
-                                    maximumFractionDigits: 2,
-                                  },
-                                ).format(
-                                  row.parquetSeconds,
-                                )} s`}
-                          </td>
-
-                          <td className="px-4 py-3">
-                            {row.featureTimedOut ||
-                            row.parquetTimedOut
-                              ? "Zeitlimit"
-                              : `${new Intl.NumberFormat(
-                                  "de-DE",
-                                  {
-                                    minimumFractionDigits: 2,
-                                    maximumFractionDigits: 2,
-                                  },
-                                ).format(
-                                  row.differenceSeconds,
-                                )} s`}
-                          </td>
-
-                          <td className="px-4 py-3">
-                            <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-700">
-                              {row.winner}
-                            </span>
-                          </td>
-                        </tr>
-                      ),
-                    )
-                )}
-              </tbody>
-            </table>
-          </div>
-        </section>
+        <aside className="results-panel">
+          <div className="results-heading"><div><span className="panel-kicker">Ergebnis</span><h2>Drei Zoomstufen</h2></div><Gauge size={22} /></div>
+          <div className="legend"><span><i className="feature-color" />Feature Layer</span><span><i className="parquet-color" />GeoParquet</span></div>
+          <div className="stage-list">{STAGES.map((stage, index) => <StageResult key={stage.id} stage={stage} result={results[index]} active={activeStage === index} />)}</div>
+          <div className="result-footnote">Niedrigere Ladezeit gewinnt.</div>
+        </aside>
       </main>
     </div>
   );
