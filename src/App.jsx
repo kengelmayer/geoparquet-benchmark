@@ -37,7 +37,9 @@ const DATASETS = {
     geometryType: "polyline",
     totalFeatures: 795657,
     parquetItemId: "f5bf927307854cefa9c5cb0cec5e2fa0",
-    featureLayerItemId: "298312d8d3534ad28e6d6d9355d62228",
+
+    featureLayerUrl:
+      "https://services2.arcgis.com/jUpNdisbWqRpMo35/ArcGIS/rest/services/OSM_Radwege_Deutschland/FeatureServer/4",
   },
 };
 
@@ -273,14 +275,32 @@ export default function App() {
   }, []);
 
   function createLayers(selected) {
+    const featureLayer = selected.featureLayerUrl
+      ? new FeatureLayer({
+          url: selected.featureLayerUrl,
+          outFields: ["*"],
+          renderer: createRenderer(selected.geometryType, [18, 105, 255, 0.78]),
+          popupEnabled: false,
+        })
+      : new FeatureLayer({
+          portalItem: {
+            id: selected.featureLayerItemId,
+          },
+          outFields: ["*"],
+          renderer: createRenderer(selected.geometryType, [18, 105, 255, 0.78]),
+          popupEnabled: false,
+        });
+
     return {
-      featureLayer: new FeatureLayer({
-        title: `${selected.label} Feature Layer`, portalItem: { id: selected.featureLayerItemId }, outFields: [],
-        renderer: createRenderer(selected.geometryType, [18, 105, 255, 0.78]), popupEnabled: false,
-      }),
+      featureLayer,
+
       parquetLayer: new ParquetLayer({
-        title: `${selected.label} GeoParquet`, data: new ParquetPortalItemData({ portalItem: { id: selected.parquetItemId } }),
-        renderer: createRenderer(selected.geometryType, [249, 115, 22, 0.82]), popupEnabled: false,
+        title: `${selected.label} GeoParquet`,
+        data: new ParquetPortalItemData({
+          portalItem: { id: selected.parquetItemId },
+        }),
+        renderer: createRenderer(selected.geometryType, [249, 115, 22, 0.82]),
+        popupEnabled: false,
       }),
     };
   }
@@ -326,7 +346,20 @@ export default function App() {
       await withTimeout((async () => {
         setStatus(`${label} wird geladen …`);
         await layer.load();
+        console.log("Feature Layer geladen");
+        console.log("Loaded:", layer.loaded);
+        console.log("URL:", layer.url);
+        console.log("Feature Count?", layer.sourceJSON);
         layerView = await runtime[`${type}View`].whenLayerView(layer);
+        try {
+          const layerView =
+            await runtime.featureView.whenLayerView(layer);
+
+          console.log("LayerView erzeugt");
+        }
+        catch(err) {
+          console.error("LayerView Fehler", err);
+        }
         await waitForFrames();
         await waitForLayerView(runtime[`${type}View`], layerView);
         await waitForFrames();
