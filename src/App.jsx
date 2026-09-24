@@ -14,7 +14,7 @@ const PORTAL_URL = "https://www.arcgis.com";
 const PARQUET_INFO_URL = "https://www.esri.com/arcgis-blog/products/arcgis-online/announcements/scaling-your-gis-workflows-with-the-new-parquet-feature-layer-beta-in-arcgis-online";
 const MAP_CENTER = [10.4, 51.1];
 const INITIAL_ZOOM = 5;
-const LOAD_TIMEOUT_MS = 30000;
+const LOAD_TIMEOUT_MS = 120000;
 
 const STAGES = [
   { id: "deutschland", label: "Deutschland", zoom: 5, detail: "Erstes Laden" },
@@ -32,14 +32,14 @@ const DATASETS = {
     featureLayerItemId: "b0f19ce050d74cf0a5f6d5937b4efa0d",
   },
   radwege: {
-    label: "Radwege",
-    description: "Radwege in Deutschland",
-    geometryType: "polyline",
-    totalFeatures: 795657,
-    parquetItemId: "f5bf927307854cefa9c5cb0cec5e2fa0",
+    label: "Flurstücke",
+    description: "Flurstücke Schleswig-Holstein",
+    geometryType: "polygone",
+    totalFeatures: 1964902,
+    parquetItemId: "794e96948594432085edec24a68e8bc6",
 
     featureLayerUrl:
-      "https://services2.arcgis.com/jUpNdisbWqRpMo35/ArcGIS/rest/services/OSM_Radwege_Deutschland/FeatureServer/4",
+      "https://services2.arcgis.com/jUpNdisbWqRpMo35/arcgis/rest/services/flstk_Schleswig_Holstein/FeatureServer/1",
   },
 };
 
@@ -72,11 +72,42 @@ function formatError(error) {
 
 function createRenderer(geometryType, color) {
   if (geometryType === "polyline") {
-    return { type: "simple", symbol: { type: "simple-line", color, width: 1.4, style: "solid" } };
+    return {
+      type: "simple",
+      symbol: {
+        type: "simple-line",
+        color,
+        width: 1.4,
+      },
+    };
   }
+
+  if (geometryType === "polygon") {
+    return {
+      type: "simple",
+      symbol: {
+        type: "simple-fill",
+        color: [...color.slice(0, 3), 0.4],
+        outline: {
+          color,
+          width: 0.5,
+        },
+      },
+    };
+  }
+
   return {
     type: "simple",
-    symbol: { type: "simple-marker", style: "circle", color, size: 3, outline: { color: [255, 255, 255, 0.3], width: 0.25 } },
+    symbol: {
+      type: "simple-marker",
+      style: "circle",
+      color,
+      size: 3,
+      outline: {
+        color: [255, 255, 255, 0.3],
+        width: 0.25,
+      },
+    },
   };
 }
 
