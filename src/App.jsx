@@ -330,7 +330,7 @@ function StageResult({ stage, result, active }) {
               GeoParquet
               <strong>
                 {result.parquetTimedOut
-                  ? "> 30,00"
+                  ? "> 60,00"
                   : formatSeconds(result.parquetMs)}{" "}
                 s
               </strong>
@@ -1092,7 +1092,7 @@ export default function App() {
 
             <p>
               Gemessen wird bis beide Karten fertig gezeichnet sind.
-              Zeitlimit: 30 Sekunden.
+              Zeitlimit: 60 Sekunden.
             </p>
           </div>
         </aside>
