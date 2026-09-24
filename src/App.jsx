@@ -13,7 +13,7 @@ import "./App.css";
 const PORTAL_URL = "https://www.arcgis.com";
 const PARQUET_INFO_URL =
   "https://www.esri.com/arcgis-blog/products/arcgis-online/announcements/scaling-your-gis-workflows-with-the-new-parquet-feature-layer-beta-in-arcgis-online";
-const LOAD_TIMEOUT_MS = 120000;
+const LOAD_TIMEOUT_MS = 60000;
 
 // Stage metadata only.
 // The actual zoom levels are configured separately for each dataset below.
@@ -45,7 +45,7 @@ const DATASETS = {
   radwege: {
     label: "Flurstücke",
     description: "Flurstücke Schleswig-Holstein",
-    geometryType: "polygone",
+    geometryType: "polygon",
     totalFeatures: 1964902,
 
     // Example configuration for Schleswig-Holstein.
@@ -279,7 +279,7 @@ function MapPanel({ type, dataset, zoom, timer, containerRef }) {
         </span>
 
         <strong>
-          {timer.timedOut ? "> 30,00" : formatSeconds(timer.milliseconds)}{" "}
+          {timer.timedOut ? "> 60,00" : formatSeconds(timer.milliseconds)}{" "}
           <small>s</small>
         </strong>
       </div>
@@ -319,7 +319,7 @@ function StageResult({ stage, result, active }) {
               Feature
               <strong>
                 {result.featureTimedOut
-                  ? "> 30,00"
+                  ? "> 60,00"
                   : formatSeconds(result.featureMs)}{" "}
                 s
               </strong>
